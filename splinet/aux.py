@@ -1,5 +1,6 @@
 import numpy as np
 import itertools
+from functools import wraps
 from shapely import geometry, validation
 from matplotlib import pyplot as plt
 from nutils import function
@@ -10,6 +11,19 @@ try:
   from nutils import log
 except Exception:
   import treelog as log
+
+
+def frozen(arr: np.ndarray) -> np.ndarray:
+  arr = np.asarray(arr)
+  arr.flags.writeable = False
+  return arr
+
+
+def freeze(fn):
+  @wraps(fn)
+  def wrapper(*args, **kwargs):
+    return frozen(fn(*args, **kwargs))
+  return wrapper
 
 
 def _normalized(vec):
@@ -400,18 +414,14 @@ def map_polygon_unit_disc(mg):
   return interval_func
 
 
-if __name__ == '__main__':
-  from template import trampoline_template
-  from genus import MultiPatchBSplineGridObject
-  A = trampoline_template()
-  mg = MultiPatchBSplineGridObject.from_template(A, knotvectors=5)
-
-  func = map_polygon_unit_disc(mg)
-  from mapping import aux
-  aux.plot(mg.domain, func)
-
-  import ipdb
-  ipdb.set_trace()
+def hermite_interpolation(v0, v1, t0, t1, npoints=101):
+  v0, v1, t0, t1 = map(np.asarray, [v0, v1, t0, t1])
+  assert v0.shape == v1.shape == t0.shape == t1.shape == (2,)
+  xi = np.linspace(0, 1, npoints)[:, None]
+  return v0[None] * (2 * xi**3 - 3*xi**2 + 1) + \
+         t0[None] * (xi**3 - 2 * xi**2 + xi) + \
+         v1[None] * (-2 * xi**3 + 3 * xi**2) + \
+         t1[None] * (xi**3 - xi**2)
 
 
 # vim:expandtab:foldmethod=indent:foldnestmax=2:sta:et:sw=2:ts=2:sts=2:foldignore=#

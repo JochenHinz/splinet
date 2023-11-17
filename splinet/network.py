@@ -15,6 +15,7 @@ from functools import wraps, cached_property
 from matplotlib import pyplot as plt
 from matplotlib.colors import BASE_COLORS
 from mapping import go, gridop, pc, ko
+import treelog as log
 
 
 UNDORECURRENCELENGTH = 5
@@ -126,29 +127,34 @@ class WithPolygonsMixin:
     super().__init__(*args, **kwargs)
     self._polygons = FrozenDict({key: MultiEdge([self.get_edges(index) for index in value]) for key, value in self.face_indices.items()})
     color_generator = cycle(sorted(set(BASE_COLORS.keys()) - set(['w', 'r'])))
-    self._colors = FrozenDict(dict(zip(self.face_indices.keys(), color_generator)))
+    face_roots = sorted(set(face_index[0] for face_index in self._polygons.keys()))
+    self._colors = FrozenDict(dict(zip(face_roots, color_generator)))
 
-  def plot_polygons(self, ax=None, indices=True, show=True, linewidth=1, vertex_thickness=8, show_axis=True, fontsize=8):
+  def plot_polygons(self, ax=None, indices=True, show_indices=None, show=True, linewidth=1, vertex_thickness=8, show_axis=True, fontsize=8, face_colors=None):
     if ax is None: fig, ax = plt.subplots()
     else: fig = ax.figure
+    if show_indices is None:
+      show_indices = indices
     ax.set_aspect('equal')
     if not show_axis:
       ax.set_axis_off()
-    face_colors = self._colors
+    if face_colors is None:
+      colors = self._colors
+      face_colors = {key[0]: colors[key[0]] if key not in self.templates else 'r' for key in self._polygons.keys()}
     for key, pol in self._polygons.items():
       # templated faces are red
-      color = face_colors[key] if key not in self.templates else 'r'
+      color = face_colors[key[0]]
       XY = pol.polygon.exterior.coords.xy
       ax.plot(*XY, color=color, linewidth=linewidth)
       ax.fill(*XY, color=color, alpha=0.1)
-    if indices:
+    if show_indices:
       for index, edge in zip(self.indices, self.edges):
         point = edge.points[y // 2] if (y := len(edge.points)) > 2 else edge.points.sum(0) / 2
         ax.text(*point, str(index), fontsize=fontsize, zorder=10, c='r')
       for face_index, pol in self._polygons.items():
         try:  # in case the polygon is invalid
           point = np.concatenate(ops.polylabel(pol.polygon).coords.xy)
-          ax.text(*point, str(list(face_index)), fontsize=fontsize, color=face_colors[face_index])
+          ax.text(*point, str(list(face_index)), fontsize=fontsize, color=face_colors[face_index[0]])
         except Exception:
           pass
     for edge in self.edges:
@@ -348,6 +354,28 @@ class EdgeNetwork(WithPolygonsMixin, Network):
           ret.setdefault(key, []).append(-indices[i])
     return ret
 
+  def plot_concave_corners(self, thresh=1e-5, corner_thickness=16, show=True, **plotkwargs):
+    concave_corners = self.concave_corners(thresh=thresh)
+    fig, ax = self.qplot(show=False, **plotkwargs)
+
+    vertices = []
+
+    for face_index, indices in concave_corners.items():
+      for index in indices:
+        edge = self.get_edges(index)
+        vertices.append(edge.vertices[-1])
+
+    if len(vertices):
+      ax.scatter(*np.asarray(vertices).T, c='r', s=corner_thickness, zorder=16)
+
+    if not show:
+      return fig, ax
+    plt.show()
+
+  def plot_uneven_faces(self, **kwargs):
+    face_colors = {key: {0: 'b', 1: 'r'}[len(val) % 2] for key, val in self.face_indices.items()}
+    return self.qplot(face_colors=face_colors, **kwargs)
+
   @undo_operation
   def replace_edge(self, index, newedge, keep_templates=True):
     newedge = as_edge(newedge)
@@ -395,7 +423,7 @@ class EdgeNetwork(WithPolygonsMixin, Network):
                                                      undo=undo)
 
     # keep all face_templates as long as they still correspond to the same face
-    from template import FaceTemplate
+    from .template import FaceTemplate
     templates = {}
     for face_index, temp in self.templates.items():
       # face_index not in new face_indices anymore => ignore
@@ -426,8 +454,12 @@ class EdgeNetwork(WithPolygonsMixin, Network):
     map_face_indices = {key: sorted(set(value)) for key, value in map_face_indices.items()}
     map_old_new = {}
     for key, values in map_face_indices.items():
-      for i, value in enumerate(values):
-        map_old_new[value] = (key, i)
+      if len(values) == 1:
+        value, = values
+        map_old_new[value] = (key,)
+      else:
+        for i, value in enumerate(values, 1):
+          map_old_new[value] = (key, i)
     face_indices = {map_old_new[face_index]: value for face_index, value in self.face_indices.items()}
     maps = {map_old_new[face_index]: value for face_index, value in self.maps.items()}
     ret = self.__class__(self.indices, self.edges, face_indices, maps=maps, fits=self.fits, undo=self)
@@ -484,10 +516,9 @@ class EdgeNetwork(WithPolygonsMixin, Network):
     for key, pol in self._polygons.items():
       if not pol.is_valid:
         string = validation.explain_validity(pol.polygon)
-        # coord = np.array(string[string.find('[')+1: string.find(']')].split(' '), dtype=float)
-        print("The face with index {} is invalid due to the following reason: {}.".format(key, string))
+        log.warning("The face with index {} is invalid due to the following reason: {}.".format(key, string))
       else:
-        print('The face with index {} is valid.'.format(key))
+        log.warning('The face with index {} is valid.'.format(key))
 
   def positively_orient(self):
     face_indices = self.face_indices.copy()
@@ -628,6 +659,7 @@ class EdgeNetwork(WithPolygonsMixin, Network):
       t = (p0 - pm1) / np.linalg.norm(p0 - pm1) + (p1 - p0) / np.linalg.norm(p1 - p0)
       t = t / np.linalg.norm(t)
       ret[-indices[i+1]] = np.array([t[1], -t[0]])
+      ret[indices[i]] = np.array([t[1], -t[0]])
     if return_sorted_indices:
       return ret, sorted_indices
     return ret
@@ -766,6 +798,10 @@ class EdgeNetwork(WithPolygonsMixin, Network):
   def qplot(self, *args, **kwargs):
     return self.plot_polygons(*args, **kwargs)
 
+  def plot_skeleton(self, *args, **kwargs):
+    from .skeleton import draw_skeleton
+    return draw_skeleton(self, *args, **kwargs)
+
   def transform(self, g):
     newedges = [Edge(g.call(*edge.points.T)) for edge in self.edges]
     return self.edit(edges=newedges)
@@ -789,7 +825,7 @@ class EdgeNetwork(WithPolygonsMixin, Network):
       self.maps[face_index] = mapping
 
   def to_SplineNetwork(self):
-    from spline import SplineNetwork
+    from .spline import SplineNetwork
     return SplineNetwork.from_EdgeNetwork(self)
 
   def make_quick_grid(self, face_index, knotvectors=8, **kwargs):
@@ -801,7 +837,10 @@ class EdgeNetwork(WithPolygonsMixin, Network):
     mg = snetwork.maps[(face_index)]
     from mapping import sol
     sol.forward_laplace(mg)
-    sol.Blechschmidt(mg)
+    if len(mg.patches) > 1:
+      sol.Blechschmidt(mg)
+    else:
+      sol.elliptic_nonvariational(mg)
     return snetwork
 
   # CANVAS OPERATIONS
@@ -868,22 +907,26 @@ class EdgeNetwork(WithPolygonsMixin, Network):
     return self.split_face_point(face_index, point, **kwargs)
 
   @undo_operation
-  def split_face_hermite(self, face_index, eta=None, gamma=None, npoints=1001):
-    from .canvas import select_vertices
-    vindices = select_vertices(self, face_index, nclicks=2)
-    v0, v1 = self.get_vertices(vindices)
+  def hermite_split(self, face_index, origin, target, eta=None, gamma=None, npoints=1001):
+    v0, v1 = self.get_vertices([origin, target])
     if eta is None:
       eta = np.linalg.norm(v1 - v0)
     if gamma is None:
       gamma = eta
 
     n = self.discrete_unit_normals(face_index)
-    n0, n1 = n[vindices[0]], n[vindices[1]]
+    n0, n1 = n[origin], n[target]
 
-    from aux import hermite_interpolation
+    from .aux import hermite_interpolation
     points = hermite_interpolation(v0, v1, -eta*n0, gamma*n1, npoints=npoints)
 
-    return self._split_face(face_index, *vindices, connecting_edge=as_edge(points))
+    return self._split_face(face_index, origin, target, connecting_edge=as_edge(points))
+
+  @undo_operation
+  def split_face_hermite(self, face_index, **kwargs):
+    from .canvas import select_vertices
+    vindices = select_vertices(self, face_index, nclicks=2)
+    return self.hermite_split(face_index, *vindices, **kwargs)
 
   def select_faces(self, **kwargs):
     from .canvas import select_faces
@@ -1008,11 +1051,11 @@ class EdgeNetwork(WithPolygonsMixin, Network):
     return ret
 
   def create_corner(self, face_index):
-    from operations import create_corner
+    from .operations import create_corner
     return create_corner(self, face_index)
 
   def create_triangle_corner(self, face_index):
-    from operations import create_triangle_corner
+    from .operations import create_triangle_corner
     return create_triangle_corner(self, face_index)
 
   # TEMPLATES + FITTING

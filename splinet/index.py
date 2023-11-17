@@ -323,7 +323,7 @@ class Edge(EdgeBase, SaveLoadMixin):
     return aux.angle_between_vectors(p1[1] - p1[0], p0[-2] - p0[-1])
 
   def copy(self):
-    return self.__class__(self.points.copy(), orientation=self.orientation, verts=self._verts.copy())
+    return self.__class__(self.points.copy(), orientation=self.orientation, verts=(self._verts if self._verts is not None else None))
 
   def transform(self, func):
     newpoints = func(self.point)
@@ -360,7 +360,7 @@ class Edge(EdgeBase, SaveLoadMixin):
 
   def __hash__(self):
     if not hasattr(self, '_hash'):
-      self._hash = hash((self.points.tobytes(), self.orientation, self.verts.tobytes()))
+      self._hash = hash((self.points.tobytes(), self.verts.tobytes()))
     return self._hash
 
   def __eq__(self, other):

@@ -1,5 +1,6 @@
 from matplotlib import pyplot as plt
 from shapely import geometry
+from .aux import _normalized
 import numbers
 import numpy as np
 from itertools import chain
@@ -95,8 +96,8 @@ class HighlightEdgeMixin:
   def __init__(self, *args, indices=None, efac=None, **kwargs):
     super().__init__(*args, **kwargs)  # forward to 2nd super() __init__
     if efac is None: efac = .025
-    assert len(self.network.pol_indices) == 1
-    allindices = tuple(list(self.network.pol_indices.values())[0])
+    assert len(self.network.face_indices) == 1
+    allindices = tuple(list(self.network.face_indices.values())[0])
     if indices is None:
       indices = allindices
     assert len(set(map(abs, indices))) == len(indices), 'Duplicate indices found.'
@@ -108,9 +109,14 @@ class HighlightEdgeMixin:
     self.edge_highlighted = False
     self.line = None
     self.v0, self.v1 = None, None
-    vertices = np.stack([ edge.vertices[0] for edge in self.network.get_edges(allindices) ])
-    self.r = efac * np.linalg.norm([ vertices[:, i].max()
-                                   - vertices[:, i].min() for i in range(2) ])
+    if len(allindices) > 1:
+      vertices = np.stack([ edge.vertices[0] for edge in self.network.get_edges(allindices) ])
+      self.r = efac * np.linalg.norm([ vertices[:, i].max()
+                                    - vertices[:, i].min() for i in range(2) ])
+    else:
+      edge, = self.network.get_edges(allindices)
+      X = edge.points
+      self.r = efac * np.linalg.norm([X[:, i].max() - X[:, i].min() for i in range(2)])
 
   def on_motion(self, event):
     'motion_notify_event'
@@ -244,8 +250,8 @@ class HighlightFaceMixin:
 
   def __init__(self, *args, **kwargs):
     super().__init__(*args, **kwargs)  # forward to 2nd super() __init__
-    assert len(self.network.pol_indices) > 1
-    self.ordered_faces = tuple(sorted(self.network.pol_indices.keys()))
+    assert len(self.network.face_indices) > 1
+    self.ordered_faces = tuple(sorted(self.network.face_indices.keys()))
     self.polygons = tuple(self.network.polygons[key].polygon for key in self.ordered_faces)
     self.face = None
     self.face_highlighted = False
@@ -291,22 +297,23 @@ class SelectFaces(MatplotlibEventHandlerWithNetwork):
     kwargs.setdefault('title', 'Click to select faces, press space to finalize')
     super().__init__(*args, **kwargs)
     if nclicks is None:
-      nclicks = len(self.network.pol_indices)
-    assert len(self.network.pol_indices) >= nclicks
-    self.ordered_faces = tuple(sorted(self.network.faces.keys()))
+      nclicks = len(self.network.face_indices)
+    assert len(self.network.face_indices) >= nclicks
+    self.ordered_faces = tuple(sorted(self.network.face_indices.keys()))
     self.polygons = tuple(self.network.polygons[key].polygon for key in self.ordered_faces)
     self.nclicks = nclicks
     self.clicked_faces = []
 
   def on_press(self, event):
     'button_press_event'
-    face = None
     if event.xdata is not None:
       x = geometry.Point(np.array([event.xdata, event.ydata]))
       for i, pol in enumerate(self.polygons):
         if x.within(pol):
           face = i
           break
+    else:
+      face = None
     if face is not None:
       self.clicked_faces.append(self.ordered_faces[face])
       pol = self.polygons[face]
@@ -363,7 +370,7 @@ class GenerateClicksWithBoundaryConstrain(GenerateClicks):
 
   def __init__(self, *args, **kwargs):
     super().__init__(*args, **kwargs)
-    assert len(self.network.pol_indices) == 1
+    assert len(self.network.face_indices) == 1
 
   def close(self):
     for i in (0, len(self.points) - 1):
@@ -381,8 +388,8 @@ class HighlightVertexMixin:
     vertices = []
     vertex_indices = []
     key, = self.network.faces
-    self.nedges = len(self.network.pol_indices[key])
-    for i, index in enumerate(self.network.pol_indices[key]):
+    self.nedges = len(self.network.face_indices[key])
+    for i, index in enumerate(self.network.face_indices[key]):
       v0, v1 = self.network.get_edges(index).vertices
       vertices.append(v0)  # only take first vertex
       vertex_indices.append(-index)
@@ -467,7 +474,7 @@ class GenerateClicksFromVertexToVertex(HighlightVertexMixin, GenerateClicks):
       if self.n is None or len(self.points) in (0, self.n - 1):
         event.xdata, event.ydata = self.vertices[self.vminind]
         self.clicked_vertices.append(
-            -self.network.pol_indices[self.face_index][self.vminind]
+            -self.network.face_indices[self.face_index][self.vminind]
         )
     super().on_press(event)
 
@@ -612,6 +619,146 @@ def closest_point(func, point, x0, lower=None, upper=None, **scipyargs):
   from scipy import optimize
 
   return optimize.minimize(myfunc, x0, constraints=constraints, **scipyargs)
+
+
+def half_face(network, face, upper_edges=None, lower_edges=None,
+                             vertices=None, orth=(), dist=(),
+                             nmasterpoints=21, npoints=101,
+                                       eps=1e-5, plot=True, interpolargs={}):
+
+  snetwork = network.take((face,))
+
+  # first select all edges of the upper (master) side
+  if upper_edges is None:
+    with SelectEdges(snetwork, title='Select upper boundaries') as handler:
+      upper_edges = [-i for i in handler.clicked_edges]  # assuming positive orientednes, we have to reverse the order
+
+  # select all edges of the lower (slave) side
+  if lower_edges is None:
+    with SelectEdges(snetwork, title='Select lower  boundaries') as handler:
+      lower_edges = handler.clicked_edges
+
+  assert len(set(map(abs, upper_edges)) & set(map(abs, lower_edges))) == 0  # make sure they are disjoint
+
+  # select start and end vertex
+  if vertices is None:
+    with SelectVertices(snetwork, title='Select starting and ending vertex', nclicks=2) as handler:
+      vertices = handler.clicked_vertices
+
+  begin, end = vertices
+
+  # select the corresponding sides
+  begin_point = snetwork.get_point_on_edge(begin)
+  end_point = snetwork.get_point_on_edge(end)
+
+  from index import Edge
+  upper_edges = snetwork.get_edges(upper_edges)
+
+  # concatenate into one edge and interpolate
+  upper_spline = Edge( np.concatenate([ edge.points if not i else edge.points[1:]
+                                          for i, edge in enumerate(upper_edges) ]) ). \
+                       toPointCloud().toInterpolatedUnivariateSpline()
+
+  # do exactly the same for the slave side
+  lower_edges = snetwork.get_edges(lower_edges)
+  lower_spline = Edge( np.concatenate([ edge.points if not i else edge.points[1:]
+                                      for i, edge in enumerate(lower_edges) ]) ). \
+                       toPointCloud().toInterpolatedUnivariateSpline()
+
+  funcs = (upper_spline, lower_spline)
+
+  edges = snetwork.polygons[face]
+  indices = snetwork.face_indices[face]
+  begin_index = indices.index(begin, mod=True)
+  end_index = indices.index(end, mod=True)
+
+  normals = edges.average_normals()
+  normal_jumps = edges.normal_jumps()
+
+  # find x values that are closest to starting and ending point (for each spline)
+  # a strong jump in the normal means the vertex protrudes into the domain.
+  # in this case, we truncate the upper / lower sides to the minimum distance
+  # to the point
+  if np.linalg.norm(normal_jumps[begin_index], 2) > 1e-1:
+    lower_bound = [closest_point(func, begin_point, 0, lower=1e-7, upper=1-1e-7).x[0] for func in funcs]
+  else:
+    lower_bound = [1e-7] * 2
+
+  if np.linalg.norm(normal_jumps[end_index], 2) > 1e-1:
+    upper_bound = [closest_point(func, end_point, 1-eps, lower=p+1e-7, upper=1-1e-7).x[0] for func, p in zip(funcs, lower_bound)]
+  else:
+    upper_bound = [1 - 1e-7] * 2
+
+  master_points = upper_spline( np.linspace(lower_bound[0], upper_bound[0], nmasterpoints) )[1: -1]
+  slave_points = []
+
+  interval = [lower_bound[1]+eps, upper_bound[1]]
+  for point in master_points:
+    x = closest_point(lower_spline, point, interval[0], lower=interval[0], upper=interval[1])
+    interval[0] = x.x[0] + eps
+    slave_points.append(lower_spline(x.x)[0])
+
+  if 0 in orth:
+    begin_index = indices.index(begin, mod=True)
+    average_normal = _normalized(-normals[begin_index])
+    vert_edge0 = Edge.between_points(slave_points[0], master_points[0])
+    # find distance along edge such that the vector from begin_point
+    # pointing toward the point associated with this distance along the edge
+    # is as close as possible to average_normal
+    y0 = np.argmin(((_normalized(vert_edge0.points - begin_point[None])
+                                                - average_normal[None])**2).sum(1)) / len(vert_edge0.points)
+  elif 0 in dist:
+    p0s = [func(val) for func, val in zip(funcs, lower_bound)]
+    vert_edge0 = Edge.between_points( p0s[1].ravel(), p0s[0].ravel() )
+    y0 = vert_edge0.get_nearest_point(begin_point, return_index=True)[1] / len(vert_edge0.points)
+  else:
+    y0 = .5
+
+  if 1 in orth:
+    end_index = indices.index(end, mod=True)
+    average_normal = _normalized(normals[end_index])
+    vert_edge1 = Edge.between_points(slave_points[-1], master_points[-1])
+    y1 = np.argmin(((_normalized(end_point[None] - vert_edge1.points)
+                                              - average_normal[None])**2).sum(1)) / len(vert_edge1.points)
+  elif 1 in dist:
+    p1s = [func(val) for func, val in zip(funcs, upper_bound)]
+    vert_edge1 = Edge.between_points( p1s[1].ravel(), p1s[0].ravel() )
+    y1 = vert_edge1.get_nearest_point(end_point, return_index=True)[1] / len(vert_edge1.points)
+  else:
+    y1 = .5
+
+  # a * x**2 + b * x + c in 0 = y0, in .5 = 0.5 in 1 = y1
+  a, b, c = np.linalg.solve(np.array([ [  0,  0, 1],
+                                       [.25, .5, 1],
+                                       [  1,  1, 1] ]), np.array([y0, .5, y1]))
+
+  xi = np.linspace(0, 1, nmasterpoints)[1: -1]
+  prefacs = (a * xi**2 + b * xi + c)[:, None]
+
+  points = np.concatenate([ begin_point[None],
+                                    prefacs * master_points
+                            + (1 - prefacs) * np.stack(slave_points, axis=0),
+                            end_point[None] ])
+
+  from mapping import pc
+  newedge = pc.PointCloud(points).toInterpolatedUnivariateSpline(**interpolargs)(np.linspace(0, 1, npoints))
+  if plot:
+    snetwork.split_face(face, begin, end, connecting_edge=newedge).qplot()
+
+  return network.split_face(face, begin, end, connecting_edge=newedge)
+
+
+def create_full_diamond(network, face, **kwargs):
+  network = create_diamond(network, face)
+  import ipdb
+  ipdb.set_trace()
+  v0 = network.max_edge_index
+  network = network.half_edge(face)
+  v1 = network.max_edge_index
+  indices = network.face_indices[face]
+  return half_face(network, face,
+                   vertices=[(v0 @ indices) * v0, -(v1 @ indices) * v1],
+                   orth=(0,), **kwargs)
 
 
 # vim:expandtab:foldmethod=indent:foldnestmax=2:sta:et:sw=2:ts=2:sts=2:foldignore=#

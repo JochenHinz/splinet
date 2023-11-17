@@ -1,14 +1,16 @@
 from .index import as_OrientableTuple, as_OrientableFloat, Edge, as_IndexSequence, \
-                   SaveLoadMixin, as_KnotObject, SplineEdge
+                   SaveLoadMixin, as_KnotObject, SplineEdge, FrozenDict
 from .canvas import MatplotlibEventHandler, SelectVertices, \
                     GenerateVertexFromClick
 
 from collections import defaultdict, deque
 from functools import wraps, lru_cache, cached_property
+from itertools import count, chain, product
 from mapping import ko
 import itertools
 import numpy as np
 from matplotlib import pyplot as plt
+from nutils import function
 
 
 # VERTEX-EDGE NETWORK
@@ -177,7 +179,7 @@ def _patches_verts_to_network(patches, patchverts):
       map_index_original_edge[myindex], map_index_original_edge[-myindex] = tuple(edge), tuple(edge)[::-1]
       face_indices[(i, 0)][j] = myindex if j in (0, 1) else -myindex  # bottom right are in positive direction, else negative
   edgedict = {index: edge for edge, index in edgedict.items()}
-  from network import EdgeNetwork
+  from .network import EdgeNetwork
   return EdgeNetwork.from_edgedict(edgedict, face_indices), map_index_original_edge
 
 
@@ -207,7 +209,7 @@ def select_index(patches, patchverts, network, index):
   indices, = list(network.face_indices.values())
 
   fig, axes = plt.subplots(nrows=1, ncols=2)
-  from canvas import select_edges
+  from .canvas import select_edges
   fig, ax0 = silhouette(patches, patchverts, show=False, ax=axes[0], index0=index)
   key, = list(network.face_indices.keys())
   index0, = select_edges(network, key,
@@ -223,7 +225,7 @@ select_index0 = lambda *args, **kwargs: select_index(*args, index=0, **kwargs)
 
 def select_indices(patches, patchverts, network):
   assert len(network.face_indices) == 1
-  from canvas import select_edges
+  from .canvas import select_edges
   (face_index,), (indices,) = zip(*network.face_indices.items())
   multipatch_network, _map = patches_verts_to_network(patches, patchverts)
 
@@ -439,9 +441,17 @@ class DragTemplateVertices(MatplotlibEventHandler):
 
 @lru_cache(maxsize=64)
 def _ordered_boundary_edges(temp):
+  """ By default the ordered boundary indices are ordered in such a way that the first edge edge0 = [i0, i1]
+      is the one with the property that i0 equals the smallest index in the sequence. """
   network, map_index_original_edge = temp.to_network()
   bindices = network.ordered_boundary_indices
-  return tuple(tuple(map_index_original_edge[index] for index in bindex) for bindex in bindices)
+  ret_ = tuple(tuple(map_index_original_edge[index] for index in bindex) for bindex in bindices)
+  ret = []
+  for subseq in ret_:
+    minindex = min(chain(*subseq))
+    index, = [i for i, item in enumerate(subseq) if item[0] == minindex]
+    ret.append(subseq[index:] + subseq[:index])
+  return tuple(ret)
 
 
 class OrderedBoundaryEdgesMixin:
@@ -515,7 +525,7 @@ class MultiPatchTemplate(SaveLoadMixin, OrderedBoundaryEdgesMixin):
 
     patchverts0 = np.array(template0.patchverts)
     patchverts1 = np.array(template1.patchverts)
-    from aux import angle_between_vectors_
+    from .aux import angle_between_vectors_
 
     v0 = patchverts0[edge0[1]] - patchverts0[edge0[0]]
     v1 = patchverts1[edge1[1]] - patchverts1[edge1[0]]
@@ -534,11 +544,11 @@ class MultiPatchTemplate(SaveLoadMixin, OrderedBoundaryEdgesMixin):
     map_verts[edge1[1]] = edge0[1]
 
     n = len(template0.patchverts)
+    n = count(len(template0.patchverts))
 
     for i in range(len(template1.patchverts)):
       if i not in edge1:
-        map_verts[i] = n
-        n += 1
+        map_verts[i] = n.__next__()
 
     patchverts = template0.patchverts + tuple( vert for i, vert in enumerate(template1.patchverts) if i not in edge1 )
     patches = template0.patches + tuple( tuple(map_verts[i] for i in patch) for patch in template1.patches )
@@ -595,7 +605,7 @@ class MultiPatchTemplate(SaveLoadMixin, OrderedBoundaryEdgesMixin):
       knotvectors = ko.KnotObject(np.linspace(0, 1, knotvectors))
     if isinstance(knotvectors, ko.KnotObject):
       knotvectors = dict(zip(self.knotvector_edges, [knotvectors]*len(self.knotvector_edges)))
-    from multipatch import MultiPatchBSplineGridObject
+    from .multipatch import MultiPatchBSplineGridObject
     return MultiPatchBSplineGridObject(self.patches, self.patchverts, knotvectors, **kwargs)
 
   def to_network(self):
@@ -629,6 +639,16 @@ class MultiPatchTemplate(SaveLoadMixin, OrderedBoundaryEdgesMixin):
     patchverts = np.array(self.patchverts, dtype=float)
     patchverts[index] += np.asarray(vec)
     return self.__class__(self.patches, patchverts, self.knotvector_edges)
+
+  @cached_property
+  def edge2patch(self):
+    ret = {}
+    for i, patch in enumerate(self.patches):
+      for edge in (patch[:2], patch[2:], patch[::2], patch[1::2]):
+        ret.setdefault(edge, []).append(i)
+        ret.setdefault(edge[::-1], []).append(i)
+
+    return FrozenDict({key: tuple(val) for key, val in ret.items()})
 
   @cached_property
   def patch_matrix(self):
@@ -780,27 +800,29 @@ class MultiPatchTemplate(SaveLoadMixin, OrderedBoundaryEdgesMixin):
     positions = tuple( (pos - position) / (1 - position) for pos in positions )
     return ret.refine(newedge, positions=positions)
 
-  def qplot(self, show=True, show_axis=True, **kwargs):
+  def qplot(self, show=True, show_axis=True, c='b', fontsize=10, **kwargs):
     fig, ax = plt.subplots()
     if not show_axis:
       ax.set_axis_off()
     ax.set_aspect('equal')
     mapped_verts = set()
-    for i, patch in enumerate(self.patches):
+    for i, patch in enumerate(self.patches, 1):
       myvertices = [self.patchverts[j] for j in patch]
       center = np.stack(myvertices).sum(0) / len(myvertices)
       XY = np.stack([myvertices[0], myvertices[2],
                      myvertices[3], myvertices[1], myvertices[0]])
       ax.plot(*XY.T, color='k')
-      ax.fill(*XY.T, color='b', alpha=.1)
+      ax.fill(*XY.T, color=c, alpha=.1)
       vertices = set(patch) - mapped_verts
       for index in vertices:
         vertex = np.asarray(self.patchverts[index])
         position = center + 1.1 * (vertex - center)
-        ax.text(*position, str(index), fontsize=8, color='r', zorder=5)
+        if fontsize > 0:
+          ax.text(*position, str(index), fontsize=fontsize, color='k', zorder=10)
         ax.scatter(*vertex, s=20, color='r', zorder=4)
         mapped_verts.update({index})
-      ax.text(*center, str([i]), fontsize=10, color='k')
+      if fontsize > 0:
+        ax.text(*center, str([i]), fontsize=fontsize, color='k')
     if not show:
       return fig, ax
     plt.show()
@@ -842,14 +864,55 @@ class MultiPatchTemplate(SaveLoadMixin, OrderedBoundaryEdgesMixin):
       patchverts = handler.patchverts
     return self.__class__(self.patches, patchverts, self._knotvector_edges)
 
+  def normalize(self):
+    """ Regauge such that vol(tempalte) = 1 and center of mass(template) = [0, 0]. """
+    mg = self.to_MultiPatchBSplineGridObject(knotvectors=2)
+    volume = mg.integrate(function.J(mg.geom))
+    patchverts = np.asarray(self.patchverts) / np.sqrt(volume)
+    obi = np.asarray([edge[0] for edge in self.ordered_boundary_edges[0]], dtype=int)
+    com = patchverts[obi].sum(0) / len(obi)
+    return MultiPatchTemplate(self.patches, patchverts - com[None], self._knotvector_edges)
+
+  def renumber(self):
+    """ Renumber such that obi = [edge[0] for edge in self.obe] is an ascending
+        sequence [0, 1, ...] """
+    obe = self.ordered_boundary_edges
+    obi = [ [edge[0] for edge in subseq] for subseq in obe ]
+    assert all( len(set(obi0) & set(obi1)) == 0 for i, obi0 in enumerate(obi[:-1]) for obi1 in obi[i+1:] ), NotImplementedError
+    index_map = {}
+    counter = count()
+    for myobi in obi:
+      for index in myobi:
+        index_map[index] = counter.__next__()
+    for index in sorted(set(range(len(self.patchverts))) - set(index_map.keys())):
+      index_map[index] = counter.__next__()
+    inv = {value: key for key, value in index_map.items()}
+    patches = [ [index_map[i] for i in patch] for patch in self.patches ]
+    patchverts = [ self.patchverts[inv[i]] for i in range(len(self.patchverts)) ]
+    knotvector_edges = [ [index_map[i] for i in edge] for edge in self._knotvector_edges ]
+    return MultiPatchTemplate(patches, patchverts, knotvector_edges)
+
 
 def singlepatch_template():
   patches = ((0, 1, 2, 3),)
-  patchverts = ((0, 0), (0, 1), (1, 0), (1, 1))
+  patchverts = ((-.5, -.5), (-.5, .5), (.5, -.5), (.5, .5))
   knotvector_edges = ( (0, 1), (0, 2) )
   return MultiPatchTemplate(patches, patchverts, knotvector_edges)
 
 
+def optionally_normalize(fn):
+
+  @wraps(fn)
+  def wrapper(*args, normalize=True, **kwargs):
+    ret = fn(*args, **kwargs)
+    if normalize:
+      ret = ret.normalize()
+    return ret
+
+  return wrapper
+
+
+@optionally_normalize
 def trampoline_template(inner_height=.5, inner_width=.5):
   """
     1 - - - - - 7
@@ -881,6 +944,7 @@ def trampoline_template(inner_height=.5, inner_width=.5):
   return MultiPatchTemplate(patches, patchverts, knotvector_edges)
 
 
+@optionally_normalize
 def incomplete_trampoline_template(orientation=0):
   """
     1 -3 - - 5 -7
@@ -907,6 +971,7 @@ def incomplete_trampoline_template(orientation=0):
   return ret.rotate(np.pi).translate([1, 1])
 
 
+@optionally_normalize
 def extended_trampoline_template():
   """ extend the trampoline template by two sides running from 1 and 6 in the direction of (5, 7)"""
 
@@ -919,6 +984,7 @@ def extended_trampoline_template():
   return MultiPatchTemplate(patches, patchverts, knotvector_edges)
 
 
+@optionally_normalize
 def diamond_template(height=1):
   """
        4
@@ -944,6 +1010,7 @@ def diamond_template(height=1):
   return MultiPatchTemplate(patches, patchverts, knotvector_edges)
 
 
+@optionally_normalize
 def double_diamond_template():
   """
        5
@@ -975,6 +1042,7 @@ def double_diamond_template():
   return MultiPatchTemplate(patches, patchverts, knotvector_edges)
 
 
+@optionally_normalize
 def n_leaf_template(N=3):
   """
                   4
@@ -999,6 +1067,7 @@ def n_leaf_template(N=3):
   return MultiPatchTemplate(patches, patchverts, knotvector_edges)
 
 
+@optionally_normalize
 def even_n_leaf_template(N=6):
   """
     ASCII art forthcoming.
@@ -1039,6 +1108,7 @@ def even_n_leaf_template(N=6):
   return MultiPatchTemplate(patches, patchverts, knotvector_edges)
 
 
+@optionally_normalize
 def diamond_with_flaps_template(height=1, flap_extend=.5):
   assert 0 < flap_extend < 1
   A = diamond_template(height=height)
@@ -1060,6 +1130,7 @@ def diamond_with_flaps_template(height=1, flap_extend=.5):
   return MultiPatchTemplate(patches, patchverts, A._knotvector_edges + ((1, 7), (6, 10)))
 
 
+@optionally_normalize
 def diamond_with_flaps_triangle_template(height=1, flap_extend=.5, triangle_height=None):
   if triangle_height is None:
     triangle_height = height * .5
@@ -1079,6 +1150,7 @@ def diamond_with_flaps_triangle_template(height=1, flap_extend=.5, triangle_heig
   return MultiPatchTemplate(patches, patchverts, knotvector_edges)
 
 
+@optionally_normalize
 def triangle_template(height=1):
 
   p0, p1, p2 = np.array([0, 0]), np.array([1, 0]), np.array([.5, np.sqrt(3 / 4)]) * np.array([1, height])
@@ -1092,6 +1164,7 @@ def triangle_template(height=1):
   return MultiPatchTemplate(patches, patchverts, knotvector_edges)
 
 
+@optionally_normalize
 def railroad_switch_template(height=1):
   """ width = 2 """
 
@@ -1112,6 +1185,7 @@ def railroad_switch_template(height=1):
   return MultiPatchTemplate(patches, patchverts, knotvector_edges)
 
 
+@optionally_normalize
 def hat_template(height=1, triangle_height=1):
 
   A = singlepatch_template().refine((0, 2), .5).stretch([0, 1], height)
@@ -1120,6 +1194,7 @@ def hat_template(height=1, triangle_height=1):
   return MultiPatchTemplate.fuse(A, B.translate([0, height]))
 
 
+@optionally_normalize
 def hat_with_flaps_template(height=1, triangle_height=1, flap_height=None, flap_extend=.5):
   if flap_height is None:
     flap_height = height / 2
@@ -1411,7 +1486,7 @@ def gmsh_template(network, face_index, verbose=True):
   vertices = np.stack([ snetwork_linearized.get_edges(edge).vertices[0]
                                              for edge in face_indices ], axis=0)
 
-  from aux import angle_between_vectors
+  from .aux import angle_between_vectors
 
   def para_angles(x):
     x = x.reshape([-1, 2])
@@ -1539,8 +1614,8 @@ class FaceTemplate:
   def make_MultipatchBSplineGridObject(self, stack_c=0, knotvectors=None, **kwargs):
     snetwork = self.snetwork
     indices, = list(snetwork.face_indices.values())
-    from multipatch import MultiPatchBSplineGridObject
-    from fit import multipatch_boundary_fit_from_univariate_gos
+    from .multipatch import MultiPatchBSplineGridObject
+    from .fit import multipatch_boundary_fit_from_univariate_gos
     obe = tuple( itertools.chain(*self.template.ordered_boundary_edges) )
     boundary_gos = make_edgedict(self.template.knotvector_edges,
                                  obe,
@@ -1567,6 +1642,39 @@ class FaceTemplate:
                          obe, self.snetwork.edgedict,
                          self.sides,
                          **kwargs)
+
+
+def map_pol_onto_other_pol(A: MultiPatchTemplate, B: MultiPatchTemplate, i0=None, p=1, nelems=5):
+  """ map one polygon harmonically onto another one
+      parameters
+      ----------
+      i0: forthcoming
+      p: degree with which the harmonic map is approximated
+      nelems: number of elements per patch per direction
+  """
+  obe0, = A.ordered_boundary_edges
+  obe1, = B.ordered_boundary_edges
+
+  obi1 = np.array([edge[0] for edge in obe1])
+
+  assert len(obe0) == len(obe1)
+
+  kv = ko.KnotObject(np.linspace(0, 1, nelems+1))
+  g0 = A.to_MultiPatchBSplineGridObject({edge: kv for edge in A._knotvector_edges})
+
+  otherverts = np.asarray(A.patchverts).copy()
+  otherverts[obi1] = np.asarray(B.patchverts)[obi1]
+
+  g1 = A.__class__(A.patches, otherverts, A._knotvector_edges).to_MultiPatchBSplineGridObject({edge: kv for edge in A._knotvector_edges})
+
+  g0.cons = g0.project(g1.geom, domain=g0.domain.boundary)
+
+  from mapping import sol
+  sol.forward_laplace(g0)
+
+  sample = g0.domain.locate(g0.geom, np.asarray(A.patchverts), eps=1e-8)
+
+  return A.__class__(A.patches, sample.eval(g0.mapping), A._knotvector_edges)
 
 
 def face_template(network, face_index, template, template_args=None, sides=None):

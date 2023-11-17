@@ -3,7 +3,6 @@ from .template import MultiPatchTemplate, \
                       patches_verts_to_network, silhouette
 
 from mapping import mul
-from nutils import mesh, log, numeric, util, topology
 import itertools
 from functools import cached_property
 import numpy as np
@@ -19,108 +18,6 @@ def _get_edges(patch):
 
 def default_ids(patches):
   return tuple( _get_edges(patch) for patch in map(tuple, patches) )
-
-
-@log.withcontext
-def multipatch(patches, knotvectors, patchverts=None, name='multipatch'):
-  from nutils.types import frozenarray
-  patches = np.array(patches)
-  if patches.dtype != int:
-    raise ValueError('`patches` should be an array of ints.')
-  if patches.ndim < 2 or patches.ndim == 2 and patches.shape[-1] % 2 != 0:
-    raise ValueError('`patches` should be an array with shape (npatches,2,...,2) or (npatches,2*ndims).')
-  elif patches.ndim > 2 and patches.shape[1:] != (2,) * (patches.ndim - 1):
-    raise ValueError('`patches` should be an array with shape (npatches,2,...,2) or (npatches,2*ndims).')
-  patches = patches.reshape(patches.shape[0], -1)
-
-  # determine topological dimension of patches
-
-  ndims = 0
-  while 2**ndims < patches.shape[1]:
-    ndims += 1
-  if 2**ndims > patches.shape[1]:
-    raise ValueError('Only hyperrectangular patches are supported: ' \
-      'number of patch vertices should be a power of two.')
-  patches = patches.reshape([patches.shape[0]] + [2]*ndims)
-
-  # group all common patch edges (and/or boundaries?)
-
-  assert isinstance(knotvectors, dict)
-  # knotvectors = {frozenset(key): item for key, item in knotvectors.items()}
-
-  # create patch topologies, geometries
-
-  if patchverts is not None:
-    patchverts = np.array(patchverts)
-    indices = set(patches.flat)
-    if tuple(sorted(indices)) != tuple(range(len(indices))):
-      raise ValueError('Patch vertices in `patches` should be numbered consecutively, starting at 0.')
-    if len(patchverts) != len(indices):
-      raise ValueError('Number of `patchverts` does not equal number of vertices specified in `patches`.')
-    if len(patchverts.shape) != 2:
-      raise ValueError('Every patch vertex should be an array of dimension 1.')
-
-  topos = []
-  coords = []
-  localcoords = []
-  for i, patch in enumerate(patches):
-    # find shape of patch and local patch coordinates
-    shape = []
-    for dim in range(ndims):
-      nelems_sides = []
-      sides = [(0,1)]*ndims
-      sides[dim] = slice(None),
-      for side in itertools.product(*sides):
-        # sideverts = frozenset(patch[side])
-        sideverts = tuple(patch[side])
-        if sideverts[::-1] in knotvectors:
-          assert sideverts not in knotvectors
-          nelems_sides.append(frozenarray(knotvectors[sideverts[::-1]].flip().knots))
-        elif sideverts in knotvectors:
-          # nelems_sides.append(knotvectors[sideverts])
-          nelems_sides.append(frozenarray(knotvectors[sideverts].knots))
-        else:
-          raise
-      if len(set(nelems_sides)) != 1:
-        raise ValueError('duplicate number of elements specified for patch {} in dimension {}'.format(i, dim))
-      shape.append(nelems_sides[0])
-
-    # myknotvector = np.prod(shape)
-    # create patch topology
-    # topos.append(mesh.rectilinear(myknotvector.knots, name='{}{}'.format(name, i))[0])
-    topos.append(mesh.rectilinear(shape, name='{}{}'.format(name, i))[0])
-    # compute patch geometry
-    # patchcoords = myknotvector.knots
-    patchcoords = shape
-    localpatchcoords = numeric.meshgrid(*patchcoords).reshape(ndims, -1)
-    if patchverts is not None:
-      patchcoords = np.array([
-        sum(
-          patchverts[j]*util.product(c if s else 1-c for c, s in zip(coord, side))
-          for j, side in zip(patch.flat, itertools.product(*[[0,1]]*ndims))
-       )
-        for coord in localpatchcoords.T
-      ]).T
-    coords.append(patchcoords)
-    localcoords.append(localpatchcoords)
-
-  # build patch boundary data
-
-  boundarydata = topology.MultipatchTopology.build_boundarydata(patches)
-
-  # join patch topologies, geometries
-
-  topo = topology.MultipatchTopology(tuple(map(topology.Patch, topos, patches, boundarydata)))
-  # funcsp = topo.basis('spline', degree=1, patchcontinuous=False)
-  knotvectors1 = {key: knotvector.to_p(1).to_c(0) for key, knotvector in knotvectors.items()}
-  funcsp = topo.basis_spline(degree=1,
-                             patchcontinuous=False,
-                             knotvalues={key: kv.knots for key, kv in knotvectors1.items()},
-                             knotmultiplicities={key: kv.knotmultiplicities for key, kv in knotvectors1.items()})
-  geom = (funcsp * np.concatenate(coords, axis=1)).sum(-1)
-  localgeom = (funcsp * np.concatenate(localcoords, axis=1)).sum(-1)
-
-  return topo, geom, localgeom
 
 
 class MultiPatchBSplineGridObject(mul.MultiPatchBSplineGridObject, OrderedBoundaryEdgesMixin):
@@ -142,18 +39,29 @@ class MultiPatchBSplineGridObject(mul.MultiPatchBSplineGridObject, OrderedBounda
   def to_MultiPatchTemplate(self):
     return MultiPatchTemplate(self.patches, self.patchverts, tuple(sorted(self.knotvectors.keys())))
 
+  def MultiPatchTemplate_from_mapping(self):
+    patchverts = np.asarray(self.patchverts)
+    sample = self.domain.locate(self.geom, patchverts, eps=1e-8)
+    return MultiPatchTemplate(self.patches, sample.eval(self.mapping), tuple(sorted(self.knotvectors.keys())))
+
   @cached_property
   def all_edges(self):
     return default_ids(self.patches)
 
-  def project_edge(self, edge, func, *args, **kwargs):
+  def get_edge_domain(self, edge):
     edge = tuple(edge)
-    all_edges = set(self.all_edges)
+    all_edges = set(itertools.chain(*self.all_edges))
     edge = edge if edge in all_edges else edge[::-1]
     assert edge in all_edges
-    (ipatch, index), *ignore = [(i, ids.index(edge)) for i, ids in enumerate(self._reference_ids) if edge in ids]
+    (ipatch, index), *ignore = [(i, ids.index(edge)) for i, ids in enumerate(self.all_edges) if edge in ids]
     side = {0: 'left', 1: 'right', 2: 'bottom', 3: 'top'}[index]
-    return self.project(func, *args, domain=self.domain.patches[ipatch].topo.boundary[side], **kwargs)
+    return self.domain.patches[ipatch].topo.boundary[side]
+
+  def project_edge(self, edge, func, *args, **kwargs):
+    topo = self.get_edge_domain(edge)
+    return self.project(func, *args, domain=topo, **kwargs)
+
+  to_template = to_MultiPatchTemplate
 
 
 def singlepatch(knotvectors, *args, patches=None, patchverts=None, **kwargs):
