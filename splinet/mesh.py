@@ -1,9 +1,8 @@
 import numpy as np
 
-from aux import frozen, freeze
-from functools import cached_property
-from splinet.network import EdgeNetwork
+from .aux import frozen, freeze
 
+from functools import cached_property
 from scipy.spatial import Delaunay
 from matplotlib import pyplot as plt
 from numba import njit

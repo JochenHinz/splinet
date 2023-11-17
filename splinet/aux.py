@@ -13,6 +13,39 @@ except Exception:
   import treelog as log
 
 
+def unit_vector(vector):
+  """ Returns the unit vector of the vector.  """
+  vector = np.asarray(vector)
+  if vector.shape == (2,):
+    return vector / np.linalg.norm(vector)
+  assert vector.shape[1:] == (2,)
+  return vector / np.linalg.norm(vector, axis=1)[:, None]
+
+
+def angle_between(v1, v2):
+  """ Returns the angle in radians between vectors 'v1' and 'v2'::
+
+    >>> angle_between((1, 0, 0), (0, 1, 0))
+    1.5707963267948966
+    >>> angle_between((1, 0, 0), (1, 0, 0))
+    0.0
+    >>> angle_between((1, 0, 0), (-1, 0, 0))
+    3.141592653589793
+  """
+  v1_u = unit_vector(v1)
+  v2_u = unit_vector(v2)
+  assert v1_u.shape == v2_u.shape
+  if v1_u.shape == (2,):
+    return np.arccos(np.clip((v1_u * v2_u).sum(), -1, 1))
+  return np.arccos(np.clip((v1_u * v2_u).sum(1), -1, 1))
+
+
+def abs_tuple(tpl):
+  a, b = tpl
+  if a > b: return b, a
+  return tuple(tpl)
+
+
 def frozen(arr: np.ndarray) -> np.ndarray:
   arr = np.asarray(arr)
   arr.flags.writeable = False

@@ -149,9 +149,6 @@ def untangle(template, patchverts, mu=.05):
 
   x = optimize.minimize(func, patchverts[dofindices].ravel())
 
-  # if not np.abs(func(x.x)) < 1e-10:
-  #   return patchverts
-
   cons[dofindices] = x.x.reshape([-1, 2])
 
   return cons
