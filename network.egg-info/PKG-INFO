@@ -1,0 +1,10 @@
+Metadata-Version: 2.1
+Name: network
+Version: 0.1a0
+Summary: network
+Home-page: http://google.com
+Author: Jochen Hinz
+Author-email: jochen.hinz@epfl.ch
+
+
+The network library for Python 3, version 0.1alpha

@@ -164,6 +164,7 @@ def untangle_template(optimizer, mu=0.05):
   if func(x0) == 0:
     return optimizer.cvector(x0)
 
+  log.warning("Initial cost function value: {}.".format(func(x0)))
   x = optimize.minimize(func, x0)
   log.warning("Template untangling success: {}".format(x.success))
   log.warning("Untangling routine terminated with cost function value: {}.".format(func(x.x)))
@@ -276,6 +277,17 @@ def optimize_custom(optimizer, func, mu=0.05):
     return optimizer.patchverts
 
   return optimizer.cvector(x.x)
+
+
+def default_strategy(template):
+  """
+    By default we untangle (if necessary) and then we homogenise the area.
+    The default factor for untangling is .3 ,i.e., if all vertex crosses are above
+    this threshold, the costfunction is zero.
+    Then we homogenise the areas with relaxation factor .5.
+  """
+  template = untangle_template(template, return_template=True, mu=.3)
+  return homogenise_areas(template, return_template=True, mu=.5)
 
 
 if __name__ == "__main__":
